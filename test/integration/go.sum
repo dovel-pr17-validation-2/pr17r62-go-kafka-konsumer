@@ -1,5 +1,5 @@
-github.com/Trendyol/kafka-cronsumer v1.6.8 h1:Ig4iyjkpDE0GrnXO8LokkJS9kTSYkv3Wi9FQnwvQRJY=
-github.com/Trendyol/kafka-cronsumer v1.6.8/go.mod h1:vG7SjwvygwTXjmeiSpcRZ0/UeGKRH9vlxjGzsysN2W4=
+github.com/Trendyol/kafka-cronsumer v1.8.11 h1:3sXeR6Imhp0uNpPL5BEIlWSaVTIp9J94Q92z7xBJQTM=
+github.com/Trendyol/kafka-cronsumer v1.8.11/go.mod h1:vG7SjwvygwTXjmeiSpcRZ0/UeGKRH9vlxjGzsysN2W4=
 github.com/Trendyol/otel-kafka-konsumer v1.0.0 h1:EunZ4DlGRbSkWoT8+ZaNg86KCNcS5DEuKe7DFiuBnQI=
 github.com/Trendyol/otel-kafka-konsumer v1.0.0/go.mod h1:f3tgOiEpnD1RKebJ2DOTEPlo22IEoa7zLPuQGuKJZhw=
 github.com/andybalholm/brotli v1.0.5 h1:8uQZIdzKmjc/iuPu7O2ioW48L81FgatrcpfFmiq/cCs=
@@ -28,8 +28,8 @@ github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaS
 github.com/golang/protobuf v1.5.3 h1:KhyjKVUg7Usr/dYsdSqoFveMYd5ko72D+zANwlG1mmg=
 github.com/golang/protobuf v1.5.3/go.mod h1:XVQd3VNwM+JqD3oG2Ue2ip4fOMUkwXdXDdiuN0vRsmY=
 github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
-github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
-github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
+github.com/google/go-cmp v0.7.0 h1:wk8382ETsv4JYUZwIsn6YpYiWiBsYLSJiTsyBybVuN8=
+github.com/google/go-cmp v0.7.0/go.mod h1:pXiqmnSA92OHEEa9HXL2W4E7lf9JzCmGVUdgjX3N/iU=
 github.com/google/uuid v1.5.0 h1:1p67kYwdtXjb0gL0BPiP1Av9wiZPo5A8z2cWkTZ+eyU=
 github.com/google/uuid v1.5.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
 github.com/klauspost/compress v1.17.0 h1:Rnbp4K9EjcDuVuHtd0dgA4qNuv9yKDYKK1ulpJwgrqM=
