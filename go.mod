@@ -7,13 +7,15 @@ require (
 	github.com/Trendyol/otel-kafka-konsumer v1.0.0 //update
 	github.com/ansrivas/fiberprometheus/v2 v2.6.1
 	github.com/gofiber/fiber/v2 v2.52.1
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/prometheus/client_golang v1.16.0
 	github.com/segmentio/kafka-go v0.4.51
 	go.opentelemetry.io/otel v1.19.0
 	go.opentelemetry.io/otel/trace v1.19.0
 	go.uber.org/zap v1.24.0
 )
+
+require github.com/prometheus/client_model v0.4.0
 
 require (
 	github.com/andybalholm/brotli v1.0.5 // indirect
@@ -30,7 +32,6 @@ require (
 	github.com/mattn/go-runewidth v0.0.15 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
 	github.com/pierrec/lz4/v4 v4.1.18 // indirect
-	github.com/prometheus/client_model v0.4.0 // indirect
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.0 // indirect
 	github.com/rivo/uniseg v0.4.4 // indirect
