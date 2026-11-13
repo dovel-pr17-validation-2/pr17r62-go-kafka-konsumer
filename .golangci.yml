@@ -1,0 +1,46 @@
+linters-settings:
+  lll:
+    line-length: 140
+  funlen:
+    lines: 100
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - errcheck
+    - dupl
+    - exhaustive
+    - funlen
+    - goconst
+    - gocritic
+    - gocyclo
+    - revive
+    - gosimple
+    - govet
+    - gosec
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - gofumpt
+    - nolintlint
+    - staticcheck
+    - stylecheck
+    - typecheck
+    - unconvert
+    - unparam
+    - unused
+    - whitespace
+
+issues:
+  # Excluding configuration per-path, per-linter, per-text and per-source
+  exclude-rules:
+    - linters:
+        - stylecheck
+      text: "ST1001:"
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+        - funlen

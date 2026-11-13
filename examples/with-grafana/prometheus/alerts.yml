@@ -1,0 +1,11 @@
+groups:
+  - name: konsumer-alerts
+    rules:
+      - alert: UnprocessedMessageIncreasing
+        expr: increase(kafka_konsumer_unprocessed_messages_total{job="konsumer"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: "critical"
+        annotations:
+          summary: "Kafka Konsumer unprocessed message increasing"
+          description: "Kafka Konsumer unprocessed message increasing, current value: {{ $value }} <http://localhost:3000/d/DlIdtG_4z/kafka-konsumer-dashboard|Grafana>"

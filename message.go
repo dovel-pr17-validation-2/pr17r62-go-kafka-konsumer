@@ -1,0 +1,218 @@
+package kafka
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"time"
+
+	kcronsumer "github.com/Trendyol/kafka-cronsumer/pkg/kafka"
+	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/protocol"
+)
+
+const (
+	errMessageKey = "x-error-message"
+)
+
+type Header = protocol.Header
+
+type Headers []Header
+
+// Pretty  Writes every header key and value, it is useful for debugging purpose
+func (hs Headers) Pretty() string {
+	headerStrings := make([]string, len(hs))
+	for i := range hs {
+		headerStrings[i] = fmt.Sprintf("%s: %s", hs[i].Key, string(hs[i].Value))
+	}
+	return strings.Join(headerStrings, ", ")
+}
+
+type Message struct {
+	Time       time.Time
+	WriterData interface{}
+
+	// Context To enable distributed tracing support
+	Context       context.Context
+	Topic         string
+	Key           []byte
+	Value         []byte
+	Headers       Headers
+	Partition     int
+	Offset        int64
+	HighWaterMark int64
+
+	// IsFailed Is only used on transactional retry disabled
+	IsFailed bool
+
+	// ErrDescription specifies the IsFailed message's error
+
+	// If available, kafka-konsumer writes this description into the failed message's
+	// headers as `x-error-message` key when producing retry topic
+	ErrDescription string
+
+	// SendDirectToDeadLetter When set to true, the message will be sent directly to the dead letter topic
+	// without attempting to process it. This is useful for messages that are known to be unprocessable.
+	// You can give directly ConsumerConfig 's DeadLetterTopic or RetryConfiguration 's deadLetterTopic field.
+	SendDirectToDeadLetter bool
+}
+
+func (m *Message) TotalSize() int {
+	return 14 + m.keySize() + m.valueSize() + m.headerSize()
+}
+
+func (m *Message) headerSize() int {
+	s := 0
+	for _, header := range m.Headers {
+		s += sizeofString(header.Key)
+		s += len(header.Value)
+	}
+	return s
+}
+
+func (m *Message) keySize() int {
+	return sizeofBytes(m.Key)
+}
+
+func (m *Message) valueSize() int {
+	return sizeofBytes(m.Value)
+}
+
+type IncomingMessage struct {
+	kafkaMessage *kafka.Message
+	message      *Message
+}
+
+func (m *Message) toKafkaMessage() kafka.Message {
+	return kafka.Message{
+		Topic:         m.Topic,
+		Partition:     m.Partition,
+		Offset:        m.Offset,
+		HighWaterMark: m.HighWaterMark,
+		Key:           m.Key,
+		Value:         m.Value,
+		Headers:       m.Headers,
+		WriterData:    m.WriterData,
+		Time:          m.Time,
+	}
+}
+
+func fromKafkaMessage(kafkaMessage *kafka.Message) *Message {
+	message := &Message{}
+	message.Topic = kafkaMessage.Topic
+	message.Partition = kafkaMessage.Partition
+	message.Offset = kafkaMessage.Offset
+	message.HighWaterMark = kafkaMessage.HighWaterMark
+	message.Key = kafkaMessage.Key
+	message.Value = kafkaMessage.Value
+	message.Headers = kafkaMessage.Headers
+	message.WriterData = kafkaMessage.WriterData
+	message.Time = kafkaMessage.Time
+	message.Context = context.TODO()
+	return message
+}
+
+func getErrorMessage(consumeErr error, msg *Message) string {
+	if msg.ErrDescription != "" {
+		return msg.ErrDescription
+	}
+	if consumeErr == nil {
+		return ""
+	}
+	return consumeErr.Error()
+}
+
+func (m *Message) toRetryableMessage(retryTopic string, consumeError error) kcronsumer.Message {
+	headers := make([]kcronsumer.Header, 0, len(m.Headers))
+	for i := range m.Headers {
+		headers = append(headers, kcronsumer.Header{
+			Key:   m.Headers[i].Key,
+			Value: m.Headers[i].Value,
+		})
+	}
+
+	headers = append(headers, kcronsumer.Header{
+		Key:   errMessageKey,
+		Value: []byte(getErrorMessage(consumeError, m)),
+	})
+
+	return kcronsumer.NewMessageBuilder().
+		WithKey(m.Key).
+		WithValue(m.Value).
+		WithTopic(retryTopic).
+		WithHeaders(headers).
+		WithPartition(m.Partition).
+		WithHighWatermark(m.HighWaterMark).
+		Build()
+}
+
+func (m *Message) toDeadLetterMessage(consumeError error) Message {
+	m.AddHeader(Header{
+		Key:   errMessageKey,
+		Value: []byte(getErrorMessage(consumeError, m)),
+	})
+	m.Topic = "" // we set on initialize for dead letter producer
+	return *m
+}
+
+func toMessage(message kcronsumer.Message) *Message {
+	headers := make([]protocol.Header, 0, len(message.Headers))
+	for i := range message.Headers {
+		headers = append(headers, protocol.Header{
+			Key:   message.Headers[i].Key,
+			Value: message.Headers[i].Value,
+		})
+	}
+
+	msg := &Message{}
+	msg.Topic = message.Topic
+	msg.Partition = message.Partition
+	msg.Offset = message.Offset
+	msg.HighWaterMark = message.HighWaterMark
+	msg.Key = message.Key
+	msg.Value = message.Value
+	msg.Headers = headers
+	msg.Time = message.Time
+	msg.Context = context.Background()
+
+	return msg
+}
+
+func (m *Message) Header(key string) *kafka.Header {
+	for i, header := range m.Headers {
+		if header.Key == key {
+			return &m.Headers[i]
+		}
+	}
+
+	return nil
+}
+
+// AddHeader works as a idempotent function
+func (m *Message) AddHeader(header Header) {
+	for i := range m.Headers {
+		if m.Headers[i].Key == header.Key {
+			m.Headers[i].Value = header.Value
+			return
+		}
+	}
+
+	m.Headers = append(m.Headers, header)
+}
+
+func (m *Message) RemoveHeader(header Header) {
+	for i, h := range m.Headers {
+		if h.Key == header.Key {
+			m.Headers = append(m.Headers[:i], m.Headers[i+1:]...)
+			break
+		}
+	}
+}
+
+func sizeofBytes(b []byte) int {
+	return 4 + len(b)
+}
+
+func sizeofString(s string) int {
+	return 2 + len(s)
+}

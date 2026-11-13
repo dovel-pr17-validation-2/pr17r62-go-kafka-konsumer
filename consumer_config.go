@@ -1,0 +1,380 @@
+package kafka
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/segmentio/kafka-go"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	kcronsumer "github.com/Trendyol/kafka-cronsumer/pkg/kafka"
+	lcronsumer "github.com/Trendyol/kafka-cronsumer/pkg/logger"
+)
+
+type ReaderConfig kafka.ReaderConfig
+
+type BatchConsumeFn func([]*Message) error
+
+type PreBatchFn func([]*Message) []*Message
+
+type ConsumeFn func(*Message) error
+
+type SkipMessageByHeaderFn func(header []kafka.Header) bool
+
+type DialConfig struct {
+	Timeout   time.Duration
+	KeepAlive time.Duration
+}
+
+type ConsumerConfig struct {
+	DistributedTracingConfiguration DistributedTracingConfiguration
+	Logger                          LoggerInterface
+	APIConfiguration                APIConfiguration
+	MetricConfiguration             MetricConfiguration
+	SASL                            *SASLConfig
+	TLS                             *TLSConfig
+	Dial                            *DialConfig
+	BatchConfiguration              *BatchConfiguration
+	ConsumeFn                       ConsumeFn
+	SkipMessageByHeaderFn           SkipMessageByHeaderFn
+	TransactionalRetry              *bool
+	RetryConfiguration              RetryConfiguration
+	LogLevel                        LogLevel
+	Rack                            string
+	ClientID                        string
+	Reader                          ReaderConfig
+	CommitInterval                  time.Duration
+	MessageGroupDuration            time.Duration
+	Concurrency                     int
+	DistributedTracingEnabled       bool
+	RetryEnabled                    bool
+	APIEnabled                      bool
+	DeadLetterTopic                 string
+	// DeadLetterProducerBatchBytes limits direct dead-letter ProduceBatch calls by approximate uncompressed message bytes.
+	// Zero or negative values disable chunking and preserve the existing single ProduceBatch behavior.
+	DeadLetterProducerBatchBytes int64
+
+	// MetricPrefix is used for prometheus fq name prefix.
+	// If not provided, default metric prefix value is `kafka_konsumer`.
+	// Applies to the processed/unprocessed message counters, fetch error counter,
+	// and message_queue_latency_seconds histogram.
+	MetricPrefix string
+}
+
+func (cfg RetryConfiguration) JSON() string {
+	return fmt.Sprintf(`{"Brokers": ["%s"], "Topic": %q, "StartTimeCron": %q, "WorkDuration": %q, `+
+		`"MaxRetry": %d, "VerifyTopicOnStartup": %t, "Rack": %q, "BackOffStrategyName": %q}`,
+		strings.Join(cfg.Brokers, "\", \""), cfg.Topic, cfg.StartTimeCron,
+		cfg.WorkDuration, cfg.MaxRetry, cfg.VerifyTopicOnStartup, cfg.Rack, cfg.BackOffStrategyName)
+}
+
+func (cfg *BatchConfiguration) JSON() string {
+	if cfg == nil {
+		return "{}"
+	}
+	return fmt.Sprintf(`{"MessageGroupLimit": %d}`, cfg.MessageGroupLimit)
+}
+
+func (cfg ReaderConfig) JSON() string {
+	return fmt.Sprintf(`{"Brokers": ["%s"], "GroupId": %q, "GroupTopics": ["%s"], `+
+		`"MaxWait": %q, "CommitInterval": %q, "StartOffset": %q}`,
+		strings.Join(cfg.Brokers, "\", \""), cfg.GroupID, strings.Join(cfg.GroupTopics, "\", \""),
+		cfg.MaxWait, cfg.CommitInterval, kcronsumer.ToStringOffset(cfg.StartOffset))
+}
+
+// removeSpaceBrokerList does not write into the given slice, it can be shared with a running reader
+func (cfg *ReaderConfig) removeSpaceBrokerList() {
+	brokers := make([]string, len(cfg.Brokers))
+	for i := range cfg.Brokers {
+		brokers[i] = strings.TrimSpace(cfg.Brokers[i])
+	}
+	cfg.Brokers = brokers
+}
+
+func (cfg *ConsumerConfig) JSON() string {
+	if cfg == nil {
+		return "{}"
+	}
+	return fmt.Sprintf(`{"ClientID": %q, "Reader": %s, "BatchConfiguration": %s, "MessageGroupDuration": %q, `+
+		`"TransactionalRetry": %t, "Concurrency": %d, "RetryEnabled": %t, "RetryConfiguration": %s, `+
+		`"Rack": %q, "SASL": %s, "TLS": %s}`,
+		cfg.ClientID, cfg.Reader.JSON(), cfg.BatchConfiguration.JSON(),
+		cfg.MessageGroupDuration, *cfg.TransactionalRetry, cfg.Concurrency,
+		cfg.RetryEnabled, cfg.RetryConfiguration.JSON(),
+		cfg.Rack, cfg.SASL.JSON(), cfg.TLS.JSON())
+}
+
+func (cfg *ConsumerConfig) JSONPretty() string {
+	return jsonPretty(cfg.JSON())
+}
+
+func (cfg *ConsumerConfig) String() string {
+	re := regexp.MustCompile(`"(\w+)"\s*:`)
+	modifiedString := re.ReplaceAllString(cfg.JSON(), `$1:`)
+	modifiedString = modifiedString[1 : len(modifiedString)-1]
+	return modifiedString
+}
+
+func (cfg *ConsumerConfig) newCronsumerConfig() *kcronsumer.Config {
+	cronsumerCfg := kcronsumer.Config{
+		MetricPrefix: cfg.RetryConfiguration.MetricPrefix,
+		ClientID:     cfg.RetryConfiguration.ClientID,
+		Brokers:      cfg.RetryConfiguration.Brokers,
+		Consumer: kcronsumer.ConsumerConfig{
+			ClientID:          cfg.ClientID,
+			GroupID:           cfg.Reader.GroupID,
+			Topic:             cfg.RetryConfiguration.Topic,
+			DeadLetterTopic:   cfg.RetryConfiguration.DeadLetterTopic,
+			Cron:              cfg.RetryConfiguration.StartTimeCron,
+			Duration:          cfg.RetryConfiguration.WorkDuration,
+			MaxRetry:          cfg.RetryConfiguration.MaxRetry,
+			Concurrency:       cfg.RetryConfiguration.Concurrency,
+			QueueCapacity:     cfg.RetryConfiguration.QueueCapacity,
+			MinBytes:          cfg.Reader.MinBytes,
+			MaxBytes:          cfg.Reader.MaxBytes,
+			MaxWait:           cfg.Reader.MaxWait,
+			CommitInterval:    cfg.Reader.CommitInterval,
+			HeartbeatInterval: cfg.Reader.HeartbeatInterval,
+			SessionTimeout:    cfg.Reader.SessionTimeout,
+			RebalanceTimeout:  cfg.Reader.RebalanceTimeout,
+			StartOffset:       kcronsumer.ToStringOffset(cfg.RetryConfiguration.StartOffset),
+			RetentionTime:     cfg.Reader.RetentionTime,
+			BackOffStrategy:   kcronsumer.GetBackoffStrategy(cfg.RetryConfiguration.BackOffStrategyName),
+		},
+		Producer: kcronsumer.ProducerConfig{
+			Balancer:     cfg.RetryConfiguration.Balancer,
+			Brokers:      cfg.RetryConfiguration.Brokers,
+			BatchSize:    cfg.RetryConfiguration.ProducerBatchSize,
+			BatchBytes:   cfg.RetryConfiguration.ProducerBatchBytes,
+			BatchTimeout: cfg.RetryConfiguration.ProducerBatchTimeout,
+			RequiredAcks: cfg.RetryConfiguration.ProducerRequiredAcks,
+			Compression:  cfg.RetryConfiguration.ProducerCompression,
+		},
+		LogLevel: lcronsumer.Level(cfg.RetryConfiguration.LogLevel),
+	}
+
+	if cfg.RetryConfiguration.SkipMessageByHeaderFn != nil {
+		cronsumerCfg.Consumer.SkipMessageByHeaderFn = func(headers []kcronsumer.Header) bool {
+			return cfg.RetryConfiguration.SkipMessageByHeaderFn(toHeaders(headers))
+		}
+	}
+
+	if !cfg.RetryConfiguration.SASL.IsEmpty() {
+		cronsumerCfg.SASL.Enabled = true
+		cronsumerCfg.SASL.AuthType = string(cfg.RetryConfiguration.SASL.Type)
+		cronsumerCfg.SASL.Username = cfg.RetryConfiguration.SASL.Username
+		cronsumerCfg.SASL.Password = cfg.RetryConfiguration.SASL.Password
+		cronsumerCfg.SASL.Rack = cfg.RetryConfiguration.Rack
+	}
+
+	if !cfg.RetryConfiguration.TLS.IsEmpty() {
+		cronsumerCfg.SASL.RootCAPath = cfg.RetryConfiguration.TLS.RootCAPath
+		cronsumerCfg.SASL.IntermediateCAPath = cfg.RetryConfiguration.TLS.IntermediateCAPath
+	}
+
+	return &cronsumerCfg
+}
+
+func (cfg *ConsumerConfig) getTopics() []string {
+	if len(cfg.Reader.GroupTopics) > 0 {
+		return cfg.Reader.GroupTopics
+	}
+
+	return []string{cfg.Reader.Topic}
+}
+
+type APIConfiguration struct {
+	// Port default is 8090
+	Port *int
+
+	// HealthCheckPath default is /healthcheck
+	HealthCheckPath *string
+}
+
+type MetricConfiguration struct {
+	// Path default is /metrics
+	Path *string
+}
+
+type DistributedTracingConfiguration struct {
+	TracerProvider trace.TracerProvider
+	Propagator     propagation.TextMapPropagator
+}
+
+func toHeaders(cronsumerHeaders []kcronsumer.Header) []Header {
+	headers := make([]Header, 0, len(cronsumerHeaders))
+	for i := range cronsumerHeaders {
+		headers = append(headers, Header{
+			Key:   cronsumerHeaders[i].Key,
+			Value: cronsumerHeaders[i].Value,
+		})
+	}
+	return headers
+}
+
+type RetryConfiguration struct {
+	// MetricPrefix is used for prometheus fq name prefix.
+	// If not provided, default metric prefix value is `kafka_cronsumer`.
+	// Currently, there are two exposed prometheus metrics. `retried_messages_total_current` and `discarded_messages_total_current`.
+	// So, if default metric prefix used, metrics names are `kafka_cronsumer_retried_messages_total_current` and
+	// `kafka_cronsumer_discarded_messages_total_current`.
+	MetricPrefix string
+
+	SASL            *SASLConfig
+	TLS             *TLSConfig
+	ClientID        string
+	StartTimeCron   string
+	Topic           string
+	DeadLetterTopic string
+	Rack            string
+	// Deprecated: VerifyTopicOnStartup is now always true. This flag will be removed from Cronsumer in future versions.
+	VerifyTopicOnStartup  bool
+	LogLevel              LogLevel
+	Brokers               []string
+	Balancer              Balancer
+	MaxRetry              int
+	WorkDuration          time.Duration
+	SkipMessageByHeaderFn SkipMessageByHeaderFn
+	Concurrency           int
+	QueueCapacity         int
+	ProducerBatchSize     int
+	ProducerBatchBytes    int64
+	ProducerBatchTimeout  time.Duration
+	ProducerRequiredAcks  kafka.RequiredAcks
+	ProducerCompression   kafka.Compression
+	// BackOffStrategyName defines the backoff strategy for the retry consumer.
+	// Valid values (case-sensitive): "fixed", "linear", "exponential".
+	// If left empty, defaults to "fixed". An invalid value causes a startup error.
+	BackOffStrategyName string
+	// StartOffset is the retry-topic consumer start when the group has no committed offset.
+	// Same as kafka.ReaderConfig.StartOffset: kafka.FirstOffset, kafka.LastOffset, or 0.
+	// Zero defaults to FirstOffset. The main reader StartOffset is not used.
+	StartOffset int64
+}
+
+type BatchConfiguration struct {
+	BatchConsumeFn            BatchConsumeFn
+	PreBatchFn                PreBatchFn
+	MessageGroupLimit         int
+	MessageGroupByteSizeLimit any
+}
+
+func (cfg *ConsumerConfig) newKafkaDialer(logger LoggerInterface) (*kafka.Dialer, error) {
+	dialer := &Dialer{
+		Dialer: &kafka.Dialer{
+			ClientID: cfg.ClientID,
+		},
+	}
+
+	if cfg.Dial != nil {
+		dialer.Dialer.Timeout = cfg.Dial.Timeout
+		dialer.Dialer.KeepAlive = cfg.Dial.KeepAlive
+	}
+
+	if cfg.SASL == nil && cfg.TLS == nil {
+		return dialer.Dialer, nil
+	}
+
+	if err := fillLayer(dialer, cfg.SASL, cfg.TLS, logger); err != nil {
+		return nil, err
+	}
+
+	return dialer.Dialer, nil
+}
+
+func (cfg *ConsumerConfig) newKafkaReader(logger LoggerInterface) (Reader, error) {
+	cfg.setDefaults()
+
+	if cfg.RetryEnabled && kcronsumer.GetBackoffStrategy(cfg.RetryConfiguration.BackOffStrategyName) == nil {
+		return nil, fmt.Errorf("invalid BackOffStrategyName %q; valid values are: fixed, linear, exponential (case-sensitive)",
+			cfg.RetryConfiguration.BackOffStrategyName)
+	}
+	offset := cfg.RetryConfiguration.StartOffset
+	if cfg.RetryEnabled && offset != 0 && offset != kafka.FirstOffset && offset != kafka.LastOffset {
+		return nil, fmt.Errorf("invalid retry StartOffset %d; set kafka.FirstOffset, kafka.LastOffset, or 0", offset)
+	}
+
+	dialer, err := cfg.newKafkaDialer(logger)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Reader.removeSpaceBrokerList()
+
+	readerCfg := kafka.ReaderConfig(cfg.Reader)
+
+	readerCfg.Dialer = dialer
+	if cfg.Rack != "" {
+		readerCfg.GroupBalancers = []kafka.GroupBalancer{kafka.RackAffinityGroupBalancer{Rack: cfg.Rack}}
+	}
+
+	reader := kafka.NewReader(readerCfg)
+
+	if cfg.DistributedTracingEnabled {
+		return NewOtelReaderWrapper(cfg, reader)
+	}
+
+	return NewReaderWrapper(reader), nil
+}
+
+func (cfg *ConsumerConfig) setDefaults() {
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 1
+	}
+
+	if cfg.RetryConfiguration.Concurrency == 0 {
+		cfg.RetryConfiguration.Concurrency = cfg.Concurrency
+	}
+
+	if cfg.CommitInterval == 0 {
+		cfg.CommitInterval = time.Second
+		// Kafka-go library default value is 0, we need to also change this.
+		cfg.Reader.CommitInterval = time.Second
+	} else {
+		cfg.Reader.CommitInterval = cfg.CommitInterval
+	}
+
+	if cfg.MessageGroupDuration == 0 {
+		cfg.MessageGroupDuration = time.Second
+	}
+
+	if cfg.BatchConfiguration != nil && cfg.BatchConfiguration.MessageGroupLimit == 0 {
+		cfg.BatchConfiguration.MessageGroupLimit = 100
+	}
+
+	if cfg.DistributedTracingEnabled {
+		if cfg.DistributedTracingConfiguration.Propagator == nil {
+			cfg.DistributedTracingConfiguration.Propagator = otel.GetTextMapPropagator()
+		}
+		if cfg.DistributedTracingConfiguration.TracerProvider == nil {
+			cfg.DistributedTracingConfiguration.TracerProvider = otel.GetTracerProvider()
+		}
+	}
+	if cfg.TransactionalRetry == nil {
+		cfg.TransactionalRetry = NewBoolPtr(true)
+	}
+
+	if cfg.RetryConfiguration.BackOffStrategyName == "" {
+		cfg.RetryConfiguration.BackOffStrategyName = kcronsumer.FixedBackOffStrategy
+	}
+}
+
+func NewBoolPtr(value bool) *bool {
+	return &value
+}
+
+func jsonPretty(jsonString string) string {
+	var out bytes.Buffer
+	err := json.Indent(&out, []byte(jsonString), "", "\t")
+	if err != nil {
+		return jsonString
+	}
+	return out.String()
+}
